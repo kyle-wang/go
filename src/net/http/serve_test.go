@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -455,7 +456,7 @@ func TestServerTimeouts(t *testing.T) {
 	if runtime.GOOS == "plan9" {
 		t.Skip("skipping test; see https://golang.org/issue/7237")
 	}
-	t.Parallel()
+	setParallel(t)
 	defer afterTest(t)
 	reqNum := 0
 	ts := httptest.NewUnstartedServer(HandlerFunc(func(res ResponseWriter, req *Request) {
@@ -939,7 +940,7 @@ func TestTLSHandshakeTimeout(t *testing.T) {
 	if runtime.GOOS == "plan9" {
 		t.Skip("skipping test; see https://golang.org/issue/7237")
 	}
-	t.Parallel()
+	setParallel(t)
 	defer afterTest(t)
 	ts := httptest.NewUnstartedServer(HandlerFunc(func(w ResponseWriter, r *Request) {}))
 	errc := make(chanWriter, 10) // but only expecting 1
@@ -1077,7 +1078,7 @@ Try:
 		}
 	}
 	if !ok {
-		t.Fatal("Failed to start up after %d tries", maxTries)
+		t.Fatalf("Failed to start up after %d tries", maxTries)
 	}
 	defer ln.Close()
 	c, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
@@ -2482,6 +2483,59 @@ func TestHijackAfterCloseNotifier(t *testing.T) {
 	}
 }
 
+func TestHijackBeforeRequestBodyRead(t *testing.T) {
+	defer afterTest(t)
+	var requestBody = bytes.Repeat([]byte("a"), 1<<20)
+	bodyOkay := make(chan bool, 1)
+	gotCloseNotify := make(chan bool, 1)
+	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
+		defer close(bodyOkay) // caller will read false if nothing else
+
+		reqBody := r.Body
+		r.Body = nil // to test that server.go doesn't use this value.
+
+		gone := w.(CloseNotifier).CloseNotify()
+		slurp, err := ioutil.ReadAll(reqBody)
+		if err != nil {
+			t.Errorf("Body read: %v", err)
+			return
+		}
+		if len(slurp) != len(requestBody) {
+			t.Errorf("Backend read %d request body bytes; want %d", len(slurp), len(requestBody))
+			return
+		}
+		if !bytes.Equal(slurp, requestBody) {
+			t.Error("Backend read wrong request body.") // 1MB; omitting details
+			return
+		}
+		bodyOkay <- true
+		select {
+		case <-gone:
+			gotCloseNotify <- true
+		case <-time.After(5 * time.Second):
+			gotCloseNotify <- false
+		}
+	}))
+	defer ts.Close()
+
+	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "POST / HTTP/1.1\r\nHost: foo\r\nContent-Length: %d\r\n\r\n%s",
+		len(requestBody), requestBody)
+	if !<-bodyOkay {
+		// already failed.
+		return
+	}
+	conn.Close()
+	if !<-gotCloseNotify {
+		t.Error("timeout waiting for CloseNotify")
+	}
+}
+
 func TestOptions(t *testing.T) {
 	uric := make(chan string, 2) // only expect 1, but leave space for 2
 	mux := NewServeMux()
@@ -2631,7 +2685,7 @@ func TestHeaderToWire(t *testing.T) {
 					return errors.New("header appeared from after WriteHeader")
 				}
 				if !strings.Contains(got, "Content-Type: some/type") {
-					return errors.New("wrong content-length")
+					return errors.New("wrong content-type")
 				}
 				return nil
 			},
@@ -2644,7 +2698,7 @@ func TestHeaderToWire(t *testing.T) {
 			},
 			check: func(got string) error {
 				if !strings.Contains(got, "Content-Type: text/html") {
-					return errors.New("wrong content-length; want html")
+					return errors.New("wrong content-type; want html")
 				}
 				return nil
 			},
@@ -2657,7 +2711,7 @@ func TestHeaderToWire(t *testing.T) {
 			},
 			check: func(got string) error {
 				if !strings.Contains(got, "Content-Type: some/type") {
-					return errors.New("wrong content-length; want html")
+					return errors.New("wrong content-type; want html")
 				}
 				return nil
 			},
@@ -2668,7 +2722,7 @@ func TestHeaderToWire(t *testing.T) {
 			},
 			check: func(got string) error {
 				if !strings.Contains(got, "Content-Type: text/plain") {
-					return errors.New("wrong content-length; want text/plain")
+					return errors.New("wrong content-type; want text/plain")
 				}
 				if !strings.Contains(got, "Content-Length: 0") {
 					return errors.New("want 0 content-length")
@@ -2985,7 +3039,6 @@ func TestTransportAndServerSharedBodyRace_h1(t *testing.T) {
 	testTransportAndServerSharedBodyRace(t, h1Mode)
 }
 func TestTransportAndServerSharedBodyRace_h2(t *testing.T) {
-	t.Skip("failing in http2 mode; golang.org/issue/13556")
 	testTransportAndServerSharedBodyRace(t, h2Mode)
 }
 func testTransportAndServerSharedBodyRace(t *testing.T, h2 bool) {
@@ -2993,11 +3046,40 @@ func testTransportAndServerSharedBodyRace(t *testing.T, h2 bool) {
 
 	const bodySize = 1 << 20
 
+	// errorf is like t.Errorf, but also writes to println.  When
+	// this test fails, it hangs. This helps debugging and I've
+	// added this enough times "temporarily".  It now gets added
+	// full time.
+	errorf := func(format string, args ...interface{}) {
+		v := fmt.Sprintf(format, args...)
+		println(v)
+		t.Error(v)
+	}
+
 	unblockBackend := make(chan bool)
 	backend := newClientServerTest(t, h2, HandlerFunc(func(rw ResponseWriter, req *Request) {
-		io.CopyN(rw, req.Body, bodySize)
+		gone := rw.(CloseNotifier).CloseNotify()
+		didCopy := make(chan interface{})
+		go func() {
+			n, err := io.CopyN(rw, req.Body, bodySize)
+			didCopy <- []interface{}{n, err}
+		}()
+		isGone := false
+	Loop:
+		for {
+			select {
+			case <-didCopy:
+				break Loop
+			case <-gone:
+				isGone = true
+			case <-time.After(time.Second):
+				println("1 second passes in backend, proxygone=", isGone)
+			}
+		}
 		<-unblockBackend
 	}))
+	var quitTimer *time.Timer
+	defer func() { quitTimer.Stop() }()
 	defer backend.close()
 
 	backendRespc := make(chan *Response, 1)
@@ -3010,17 +3092,17 @@ func testTransportAndServerSharedBodyRace(t *testing.T, h2 bool) {
 
 		bresp, err := proxy.c.Do(req2)
 		if err != nil {
-			t.Errorf("Proxy outbound request: %v", err)
+			errorf("Proxy outbound request: %v", err)
 			return
 		}
 		_, err = io.CopyN(ioutil.Discard, bresp.Body, bodySize/2)
 		if err != nil {
-			t.Errorf("Proxy copy error: %v", err)
+			errorf("Proxy copy error: %v", err)
 			return
 		}
 		backendRespc <- bresp // to close later
 
-		// Try to cause a race: Both the DefaultTransport and the proxy handler's Server
+		// Try to cause a race: Both the Transport and the proxy handler's Server
 		// will try to read/close req.Body (aka req2.Body)
 		if h2 {
 			close(cancel)
@@ -3030,6 +3112,20 @@ func testTransportAndServerSharedBodyRace(t *testing.T, h2 bool) {
 		rw.Write([]byte("OK"))
 	}))
 	defer proxy.close()
+	defer func() {
+		// Before we shut down our two httptest.Servers, start a timer.
+		// We choose 7 seconds because httptest.Server starts logging
+		// warnings to stderr at 5 seconds. If we don't disarm this bomb
+		// in 7 seconds (after the two httptest.Server.Close calls above),
+		// then we explode with stacks.
+		quitTimer = time.AfterFunc(7*time.Second, func() {
+			debug.SetTraceback("ALL")
+			stacks := make([]byte, 1<<20)
+			stacks = stacks[:runtime.Stack(stacks, true)]
+			fmt.Fprintf(os.Stderr, "%s", stacks)
+			log.Fatalf("Timeout.")
+		})
+	}()
 
 	defer close(unblockBackend)
 	req, _ := NewRequest("POST", proxy.ts.URL, io.LimitReader(neverEnding('a'), bodySize))

@@ -87,6 +87,18 @@ for a blocked signal, it will be unblocked. If, later, Reset is
 called for that signal, or Stop is called on all channels passed to
 Notify for that signal, the signal will once again be blocked.
 
+SIGPIPE
+
+When a Go program receives an EPIPE error from the kernel while
+writing to file descriptors 1 or 2 (standard output or standard
+error), it will raise a SIGPIPE signal.  If the program is not
+currently receiving SIGPIPE via a call to Notify, this will cause the
+program to exit with SIGPIPE.  On descriptors other than 1 or 2, the
+write will return the EPIPE error.  This means that, by default,
+command line programs will behave like typical Unix command line
+programs, while other programs will not crash with SIGPIPE when
+writing to a closed network connection.
+
 Go programs that use cgo or SWIG
 
 In a Go program that includes non-Go code, typically C/C++ code
@@ -162,13 +174,20 @@ signal arrives while executing non-Go code, the Go runtime will invoke
 the existing signal handler instead of the Go signal handler.
 
 Go code built with -buildmode=c-archive or -buildmode=c-shared will
-not install any other signal handlers. TODO: Describe Notify behavior.
+not install any other signal handlers by default. If there is an
+existing signal handler, the Go runtime will turn on the SA_ONSTACK
+flag and otherwise keep the signal handler. If Notify is called for an
+asynchronous signal, a Go signal handler will be installed for that
+signal. If, later, Reset is called for that signal, the original
+handling for that signal will be reinstalled, restoring the non-Go
+signal handler if any.
 
-Go code built otherwise will install a signal handler for the
-asynchronous signals listed above, and save any existing signal
-handler. If a signal is delivered to a non-Go thread, it will act as
-described above, except that if there is an existing non-Go signal
-handler, that handler will be installed before raising the signal.
+Go code built without -buildmode=c-archive or -buildmode=c-shared will
+install a signal handler for the asynchronous signals listed above,
+and save any existing signal handler. If a signal is delivered to a
+non-Go thread, it will act as described above, except that if there is
+an existing non-Go signal handler, that handler will be installed
+before raising the signal.
 
 Windows
 

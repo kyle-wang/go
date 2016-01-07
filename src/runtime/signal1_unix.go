@@ -49,33 +49,44 @@ func initsig() {
 			continue
 		}
 		fwdSig[i] = getsig(i)
-		// For some signals, we respect an inherited SIG_IGN handler
-		// rather than insist on installing our own default handler.
-		// Even these signals can be fetched using the os/signal package.
-		switch i {
-		case _SIGHUP, _SIGINT:
-			if getsig(i) == _SIG_IGN {
-				t.flags = _SigNotify | _SigIgnored
-				continue
+
+		if !sigInstallGoHandler(i) {
+			// Even if we are not installing a signal handler,
+			// set SA_ONSTACK if necessary.
+			if fwdSig[i] != _SIG_DFL && fwdSig[i] != _SIG_IGN {
+				setsigstack(i)
 			}
-		}
-
-		if t.flags&_SigSetStack != 0 {
-			setsigstack(i)
-			continue
-		}
-
-		// When built using c-archive or c-shared, only
-		// install signal handlers for synchronous signals.
-		// Set SA_ONSTACK for other signals if necessary.
-		if (isarchive || islibrary) && t.flags&_SigPanic == 0 {
-			setsigstack(i)
 			continue
 		}
 
 		t.flags |= _SigHandling
 		setsig(i, funcPC(sighandler), true)
 	}
+}
+
+func sigInstallGoHandler(sig int32) bool {
+	// For some signals, we respect an inherited SIG_IGN handler
+	// rather than insist on installing our own default handler.
+	// Even these signals can be fetched using the os/signal package.
+	switch sig {
+	case _SIGHUP, _SIGINT:
+		if fwdSig[sig] == _SIG_IGN {
+			return false
+		}
+	}
+
+	t := &sigtable[sig]
+	if t.flags&_SigSetStack != 0 {
+		return false
+	}
+
+	// When built using c-archive or c-shared, only install signal
+	// handlers for synchronous signals.
+	if (isarchive || islibrary) && t.flags&_SigPanic == 0 {
+		return false
+	}
+
+	return true
 }
 
 func sigenable(sig uint32) {
@@ -90,9 +101,6 @@ func sigenable(sig uint32) {
 		<-maskUpdatedChan
 		if t.flags&_SigHandling == 0 {
 			t.flags |= _SigHandling
-			if getsig(int32(sig)) == _SIG_IGN {
-				t.flags |= _SigIgnored
-			}
 			setsig(int32(sig), funcPC(sighandler), true)
 		}
 	}
@@ -108,13 +116,13 @@ func sigdisable(sig uint32) {
 		ensureSigM()
 		disableSigChan <- sig
 		<-maskUpdatedChan
-		if t.flags&_SigHandling != 0 {
+
+		// If initsig does not install a signal handler for a
+		// signal, then to go back to the state before Notify
+		// we should remove the one we installed.
+		if !sigInstallGoHandler(int32(sig)) {
 			t.flags &^= _SigHandling
-			if t.flags&_SigIgnored != 0 {
-				setsig(int32(sig), _SIG_IGN, true)
-			} else {
-				setsig(int32(sig), _SIG_DFL, true)
-			}
+			setsig(int32(sig), fwdSig[sig], true)
 		}
 	}
 }
@@ -146,8 +154,21 @@ func resetcpuprofiler(hz int32) {
 }
 
 func sigpipe() {
-	setsig(_SIGPIPE, _SIG_DFL, false)
-	raise(_SIGPIPE)
+	if sigsend(_SIGPIPE) {
+		return
+	}
+	dieFromSignal(_SIGPIPE)
+}
+
+// dieFromSignal kills the program with a signal.
+// This provides the expected exit status for the shell.
+// This is only called with fatal signals expected to kill the process.
+func dieFromSignal(sig int32) {
+	setsig(sig, _SIG_DFL, false)
+	updatesigmask(sigmask{})
+	raise(sig)
+	// That should have killed us; call exit just in case.
+	exit(2)
 }
 
 // raisebadsignal is called when a signal is received on a non-Go
@@ -200,9 +221,7 @@ func crash() {
 		}
 	}
 
-	updatesigmask(sigmask{})
-	setsig(_SIGABRT, _SIG_DFL, false)
-	raise(_SIGABRT)
+	dieFromSignal(_SIGABRT)
 }
 
 // ensureSigM starts one global, sleeping thread to make sure at least one thread

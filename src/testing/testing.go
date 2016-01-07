@@ -293,7 +293,8 @@ var _ TB = (*B)(nil)
 // may be called simultaneously from multiple goroutines.
 type T struct {
 	common
-	name          string    // Name of test.
+	name          string // Name of test.
+	isParallel    bool
 	startParallel chan bool // Parallel tests will wait on this.
 }
 
@@ -427,6 +428,11 @@ func (c *common) Skipped() bool {
 // Parallel signals that this test is to be run in parallel with (and only with)
 // other parallel tests.
 func (t *T) Parallel() {
+	if t.isParallel {
+		panic("testing: t.Parallel called multiple times")
+	}
+	t.isParallel = true
+
 	// We don't want to include the time we spend waiting for serial tests
 	// in the test duration. Record the elapsed time thus far and reset the
 	// timer afterwards.

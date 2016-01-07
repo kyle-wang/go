@@ -16,6 +16,7 @@ import (
 	"log"
 	. "net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"sort"
@@ -621,10 +622,7 @@ func testResponseBodyReadAfterClose(t *testing.T, h2 bool) {
 }
 
 func TestConcurrentReadWriteReqBody_h1(t *testing.T) { testConcurrentReadWriteReqBody(t, h1Mode) }
-func TestConcurrentReadWriteReqBody_h2(t *testing.T) {
-	t.Skip("known failing; golang.org/issue/13659")
-	testConcurrentReadWriteReqBody(t, h2Mode)
-}
+func TestConcurrentReadWriteReqBody_h2(t *testing.T) { testConcurrentReadWriteReqBody(t, h2Mode) }
 func testConcurrentReadWriteReqBody(t *testing.T, h2 bool) {
 	defer afterTest(t)
 	const reqBody = "some request body"
@@ -652,7 +650,7 @@ func testConcurrentReadWriteReqBody(t *testing.T, h2 bool) {
 				// our HTTP/1 implementation intentionally
 				// doesn't permit writes during read (mostly
 				// due to it being undefined); if that is ever
-				// relaxed, fix this.
+				// relaxed, change this.
 				<-didRead
 			}
 			io.WriteString(w, resBody)
@@ -673,5 +671,124 @@ func testConcurrentReadWriteReqBody(t *testing.T, h2 bool) {
 	}
 	if string(data) != resBody {
 		t.Errorf("read %q; want %q", data, resBody)
+	}
+}
+
+func TestConnectRequest_h1(t *testing.T) { testConnectRequest(t, h1Mode) }
+func TestConnectRequest_h2(t *testing.T) { testConnectRequest(t, h2Mode) }
+func testConnectRequest(t *testing.T, h2 bool) {
+	defer afterTest(t)
+	gotc := make(chan *Request, 1)
+	cst := newClientServerTest(t, h2, HandlerFunc(func(w ResponseWriter, r *Request) {
+		gotc <- r
+	}))
+	defer cst.close()
+
+	u, err := url.Parse(cst.ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		req  *Request
+		want string
+	}{
+		{
+			req: &Request{
+				Method: "CONNECT",
+				Header: Header{},
+				URL:    u,
+			},
+			want: u.Host,
+		},
+		{
+			req: &Request{
+				Method: "CONNECT",
+				Header: Header{},
+				URL:    u,
+				Host:   "example.com:123",
+			},
+			want: "example.com:123",
+		},
+	}
+
+	for i, tt := range tests {
+		res, err := cst.c.Do(tt.req)
+		if err != nil {
+			t.Errorf("%d. RoundTrip = %v", i, err)
+			continue
+		}
+		res.Body.Close()
+		req := <-gotc
+		if req.Method != "CONNECT" {
+			t.Errorf("method = %q; want CONNECT", req.Method)
+		}
+		if req.Host != tt.want {
+			t.Errorf("Host = %q; want %q", req.Host, tt.want)
+		}
+		if req.URL.Host != tt.want {
+			t.Errorf("URL.Host = %q; want %q", req.URL.Host, tt.want)
+		}
+	}
+}
+
+func TestTransportUserAgent_h1(t *testing.T) { testTransportUserAgent(t, h1Mode) }
+func TestTransportUserAgent_h2(t *testing.T) { testTransportUserAgent(t, h2Mode) }
+func testTransportUserAgent(t *testing.T, h2 bool) {
+	defer afterTest(t)
+	cst := newClientServerTest(t, h2, HandlerFunc(func(w ResponseWriter, r *Request) {
+		fmt.Fprintf(w, "%q", r.Header["User-Agent"])
+	}))
+	defer cst.close()
+
+	either := func(a, b string) string {
+		if h2 {
+			return b
+		}
+		return a
+	}
+
+	tests := []struct {
+		setup func(*Request)
+		want  string
+	}{
+		{
+			func(r *Request) {},
+			either(`["Go-http-client/1.1"]`, `["Go-http-client/2.0"]`),
+		},
+		{
+			func(r *Request) { r.Header.Set("User-Agent", "foo/1.2.3") },
+			`["foo/1.2.3"]`,
+		},
+		{
+			func(r *Request) { r.Header["User-Agent"] = []string{"single", "or", "multiple"} },
+			`["single"]`,
+		},
+		{
+			func(r *Request) { r.Header.Set("User-Agent", "") },
+			`[]`,
+		},
+		{
+			func(r *Request) { r.Header["User-Agent"] = nil },
+			`[]`,
+		},
+	}
+	for i, tt := range tests {
+		req, _ := NewRequest("GET", cst.ts.URL, nil)
+		tt.setup(req)
+		res, err := cst.c.Do(req)
+		if err != nil {
+			t.Errorf("%d. RoundTrip = %v", i, err)
+			continue
+		}
+		slurp, err := ioutil.ReadAll(res.Body)
+		res.Body.Close()
+		if err != nil {
+			t.Errorf("%d. read body = %v", i, err)
+			continue
+		}
+		if string(slurp) != tt.want {
+			t.Errorf("%d. body mismatch.\n got: %s\nwant: %s\n", i, slurp, tt.want)
+		}
 	}
 }
