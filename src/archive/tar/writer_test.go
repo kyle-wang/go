@@ -6,11 +6,11 @@ package tar
 
 import (
 	"bytes"
-	"fmt"
+	"encoding/hex"
 	"io"
 	"io/ioutil"
-	"math"
 	"os"
+	"path"
 	"reflect"
 	"sort"
 	"strings"
@@ -19,251 +19,269 @@ import (
 	"time"
 )
 
-type writerTestEntry struct {
-	header   *Header
-	contents string
-}
-
-type writerTest struct {
-	file    string // filename of expected output
-	entries []*writerTestEntry
-}
-
-var writerTests = []*writerTest{
-	// The writer test file was produced with this command:
-	// tar (GNU tar) 1.26
-	//   ln -s small.txt link.txt
-	//   tar -b 1 --format=ustar -c -f writer.tar small.txt small2.txt link.txt
-	{
-		file: "testdata/writer.tar",
-		entries: []*writerTestEntry{
-			{
-				header: &Header{
-					Name:     "small.txt",
-					Mode:     0640,
-					Uid:      73025,
-					Gid:      5000,
-					Size:     5,
-					ModTime:  time.Unix(1246508266, 0),
-					Typeflag: '0',
-					Uname:    "dsymonds",
-					Gname:    "eng",
-				},
-				contents: "Kilts",
-			},
-			{
-				header: &Header{
-					Name:     "small2.txt",
-					Mode:     0640,
-					Uid:      73025,
-					Gid:      5000,
-					Size:     11,
-					ModTime:  time.Unix(1245217492, 0),
-					Typeflag: '0',
-					Uname:    "dsymonds",
-					Gname:    "eng",
-				},
-				contents: "Google.com\n",
-			},
-			{
-				header: &Header{
-					Name:     "link.txt",
-					Mode:     0777,
-					Uid:      1000,
-					Gid:      1000,
-					Size:     0,
-					ModTime:  time.Unix(1314603082, 0),
-					Typeflag: '2',
-					Linkname: "small.txt",
-					Uname:    "strings",
-					Gname:    "strings",
-				},
-				// no contents
-			},
-		},
-	},
-	// The truncated test file was produced using these commands:
-	//   dd if=/dev/zero bs=1048576 count=16384 > /tmp/16gig.txt
-	//   tar -b 1 -c -f- /tmp/16gig.txt | dd bs=512 count=8 > writer-big.tar
-	{
-		file: "testdata/writer-big.tar",
-		entries: []*writerTestEntry{
-			{
-				header: &Header{
-					Name:     "tmp/16gig.txt",
-					Mode:     0640,
-					Uid:      73025,
-					Gid:      5000,
-					Size:     16 << 30,
-					ModTime:  time.Unix(1254699560, 0),
-					Typeflag: '0',
-					Uname:    "dsymonds",
-					Gname:    "eng",
-				},
-				// fake contents
-				contents: strings.Repeat("\x00", 4<<10),
-			},
-		},
-	},
-	// The truncated test file was produced using these commands:
-	//   dd if=/dev/zero bs=1048576 count=16384 > (longname/)*15 /16gig.txt
-	//   tar -b 1 -c -f- (longname/)*15 /16gig.txt | dd bs=512 count=8 > writer-big-long.tar
-	{
-		file: "testdata/writer-big-long.tar",
-		entries: []*writerTestEntry{
-			{
-				header: &Header{
-					Name:     strings.Repeat("longname/", 15) + "16gig.txt",
-					Mode:     0644,
-					Uid:      1000,
-					Gid:      1000,
-					Size:     16 << 30,
-					ModTime:  time.Unix(1399583047, 0),
-					Typeflag: '0',
-					Uname:    "guillaume",
-					Gname:    "guillaume",
-				},
-				// fake contents
-				contents: strings.Repeat("\x00", 4<<10),
-			},
-		},
-	},
-	// This file was produced using gnu tar 1.17
-	// gnutar  -b 4 --format=ustar (longname/)*15 + file.txt
-	{
-		file: "testdata/ustar.tar",
-		entries: []*writerTestEntry{
-			{
-				header: &Header{
-					Name:     strings.Repeat("longname/", 15) + "file.txt",
-					Mode:     0644,
-					Uid:      0765,
-					Gid:      024,
-					Size:     06,
-					ModTime:  time.Unix(1360135598, 0),
-					Typeflag: '0',
-					Uname:    "shane",
-					Gname:    "staff",
-				},
-				contents: "hello\n",
-			},
-		},
-	},
-	// This file was produced using gnu tar 1.26
-	// echo "Slartibartfast" > file.txt
-	// ln file.txt hard.txt
-	// tar -b 1 --format=ustar -c -f hardlink.tar file.txt hard.txt
-	{
-		file: "testdata/hardlink.tar",
-		entries: []*writerTestEntry{
-			{
-				header: &Header{
-					Name:     "file.txt",
-					Mode:     0644,
-					Uid:      1000,
-					Gid:      100,
-					Size:     15,
-					ModTime:  time.Unix(1425484303, 0),
-					Typeflag: '0',
-					Uname:    "vbatts",
-					Gname:    "users",
-				},
-				contents: "Slartibartfast\n",
-			},
-			{
-				header: &Header{
-					Name:     "hard.txt",
-					Mode:     0644,
-					Uid:      1000,
-					Gid:      100,
-					Size:     0,
-					ModTime:  time.Unix(1425484303, 0),
-					Typeflag: '1',
-					Linkname: "file.txt",
-					Uname:    "vbatts",
-					Gname:    "users",
-				},
-				// no contents
-			},
-		},
-	},
-}
-
-// Render byte array in a two-character hexadecimal string, spaced for easy visual inspection.
-func bytestr(offset int, b []byte) string {
-	const rowLen = 32
-	s := fmt.Sprintf("%04x ", offset)
-	for _, ch := range b {
-		switch {
-		case '0' <= ch && ch <= '9', 'A' <= ch && ch <= 'Z', 'a' <= ch && ch <= 'z':
-			s += fmt.Sprintf("  %c", ch)
-		default:
-			s += fmt.Sprintf(" %02x", ch)
+func bytediff(a, b []byte) string {
+	const (
+		uniqueA  = "-  "
+		uniqueB  = "+  "
+		identity = "   "
+	)
+	var ss []string
+	sa := strings.Split(strings.TrimSpace(hex.Dump(a)), "\n")
+	sb := strings.Split(strings.TrimSpace(hex.Dump(b)), "\n")
+	for len(sa) > 0 && len(sb) > 0 {
+		if sa[0] == sb[0] {
+			ss = append(ss, identity+sa[0])
+		} else {
+			ss = append(ss, uniqueA+sa[0])
+			ss = append(ss, uniqueB+sb[0])
 		}
+		sa, sb = sa[1:], sb[1:]
 	}
-	return s
-}
-
-// Render a pseudo-diff between two blocks of bytes.
-func bytediff(a []byte, b []byte) string {
-	const rowLen = 32
-	s := fmt.Sprintf("(%d bytes vs. %d bytes)\n", len(a), len(b))
-	for offset := 0; len(a)+len(b) > 0; offset += rowLen {
-		na, nb := rowLen, rowLen
-		if na > len(a) {
-			na = len(a)
-		}
-		if nb > len(b) {
-			nb = len(b)
-		}
-		sa := bytestr(offset, a[0:na])
-		sb := bytestr(offset, b[0:nb])
-		if sa != sb {
-			s += fmt.Sprintf("-%v\n+%v\n", sa, sb)
-		}
-		a = a[na:]
-		b = b[nb:]
+	for len(sa) > 0 {
+		ss = append(ss, uniqueA+sa[0])
+		sa = sa[1:]
 	}
-	return s
+	for len(sb) > 0 {
+		ss = append(ss, uniqueB+sb[0])
+		sb = sb[1:]
+	}
+	return strings.Join(ss, "\n")
 }
 
 func TestWriter(t *testing.T) {
-testLoop:
-	for i, test := range writerTests {
-		expected, err := ioutil.ReadFile(test.file)
-		if err != nil {
-			t.Errorf("test %d: Unexpected error: %v", i, err)
-			continue
-		}
+	type entry struct {
+		header   *Header
+		contents string
+	}
 
-		buf := new(bytes.Buffer)
-		tw := NewWriter(iotest.TruncateWriter(buf, 4<<10)) // only catch the first 4 KB
-		big := false
-		for j, entry := range test.entries {
-			big = big || entry.header.Size > 1<<10
-			if err := tw.WriteHeader(entry.header); err != nil {
-				t.Errorf("test %d, entry %d: Failed writing header: %v", i, j, err)
-				continue testLoop
-			}
-			if _, err := io.WriteString(tw, entry.contents); err != nil {
-				t.Errorf("test %d, entry %d: Failed writing contents: %v", i, j, err)
-				continue testLoop
-			}
-		}
-		// Only interested in Close failures for the small tests.
-		if err := tw.Close(); err != nil && !big {
-			t.Errorf("test %d: Failed closing archive: %v", i, err)
-			continue testLoop
-		}
+	vectors := []struct {
+		file    string // filename of expected output
+		entries []*entry
+		err     error // expected error on WriteHeader
+	}{{
+		// The writer test file was produced with this command:
+		// tar (GNU tar) 1.26
+		//   ln -s small.txt link.txt
+		//   tar -b 1 --format=ustar -c -f writer.tar small.txt small2.txt link.txt
+		file: "testdata/writer.tar",
+		entries: []*entry{{
+			header: &Header{
+				Name:     "small.txt",
+				Mode:     0640,
+				Uid:      73025,
+				Gid:      5000,
+				Size:     5,
+				ModTime:  time.Unix(1246508266, 0),
+				Typeflag: '0',
+				Uname:    "dsymonds",
+				Gname:    "eng",
+			},
+			contents: "Kilts",
+		}, {
+			header: &Header{
+				Name:     "small2.txt",
+				Mode:     0640,
+				Uid:      73025,
+				Gid:      5000,
+				Size:     11,
+				ModTime:  time.Unix(1245217492, 0),
+				Typeflag: '0',
+				Uname:    "dsymonds",
+				Gname:    "eng",
+			},
+			contents: "Google.com\n",
+		}, {
+			header: &Header{
+				Name:     "link.txt",
+				Mode:     0777,
+				Uid:      1000,
+				Gid:      1000,
+				Size:     0,
+				ModTime:  time.Unix(1314603082, 0),
+				Typeflag: '2',
+				Linkname: "small.txt",
+				Uname:    "strings",
+				Gname:    "strings",
+			},
+			// no contents
+		}},
+	}, {
+		// The truncated test file was produced using these commands:
+		//   dd if=/dev/zero bs=1048576 count=16384 > /tmp/16gig.txt
+		//   tar -b 1 -c -f- /tmp/16gig.txt | dd bs=512 count=8 > writer-big.tar
+		file: "testdata/writer-big.tar",
+		entries: []*entry{{
+			header: &Header{
+				Name:     "tmp/16gig.txt",
+				Mode:     0640,
+				Uid:      73025,
+				Gid:      5000,
+				Size:     16 << 30,
+				ModTime:  time.Unix(1254699560, 0),
+				Typeflag: '0',
+				Uname:    "dsymonds",
+				Gname:    "eng",
+				Devminor: -1, // Force use of GNU format
+			},
+			// fake contents
+			contents: strings.Repeat("\x00", 4<<10),
+		}},
+	}, {
+		// This truncated file was produced using this library.
+		// It was verified to work with GNU tar 1.27.1 and BSD tar 3.1.2.
+		//  dd if=/dev/zero bs=1G count=16 >> writer-big-long.tar
+		//  gnutar -xvf writer-big-long.tar
+		//  bsdtar -xvf writer-big-long.tar
+		//
+		// This file is in PAX format.
+		file: "testdata/writer-big-long.tar",
+		entries: []*entry{{
+			header: &Header{
+				Name:     strings.Repeat("longname/", 15) + "16gig.txt",
+				Mode:     0644,
+				Uid:      1000,
+				Gid:      1000,
+				Size:     16 << 30,
+				ModTime:  time.Unix(1399583047, 0),
+				Typeflag: '0',
+				Uname:    "guillaume",
+				Gname:    "guillaume",
+			},
+			// fake contents
+			contents: strings.Repeat("\x00", 4<<10),
+		}},
+	}, {
+		// This file was produced using GNU tar v1.17.
+		//	gnutar -b 4 --format=ustar (longname/)*15 + file.txt
+		file: "testdata/ustar.tar",
+		entries: []*entry{{
+			header: &Header{
+				Name:     strings.Repeat("longname/", 15) + "file.txt",
+				Mode:     0644,
+				Uid:      0765,
+				Gid:      024,
+				Size:     06,
+				ModTime:  time.Unix(1360135598, 0),
+				Typeflag: '0',
+				Uname:    "shane",
+				Gname:    "staff",
+			},
+			contents: "hello\n",
+		}},
+	}, {
+		// This file was produced using gnu tar 1.26
+		// echo "Slartibartfast" > file.txt
+		// ln file.txt hard.txt
+		// tar -b 1 --format=ustar -c -f hardlink.tar file.txt hard.txt
+		file: "testdata/hardlink.tar",
+		entries: []*entry{{
+			header: &Header{
+				Name:     "file.txt",
+				Mode:     0644,
+				Uid:      1000,
+				Gid:      100,
+				Size:     15,
+				ModTime:  time.Unix(1425484303, 0),
+				Typeflag: '0',
+				Uname:    "vbatts",
+				Gname:    "users",
+			},
+			contents: "Slartibartfast\n",
+		}, {
+			header: &Header{
+				Name:     "hard.txt",
+				Mode:     0644,
+				Uid:      1000,
+				Gid:      100,
+				Size:     0,
+				ModTime:  time.Unix(1425484303, 0),
+				Typeflag: '1',
+				Linkname: "file.txt",
+				Uname:    "vbatts",
+				Gname:    "users",
+			},
+			// no contents
+		}},
+	}, {
+		entries: []*entry{{
+			header: &Header{
+				Name:     "bad-null.txt",
+				Typeflag: '0',
+				Xattrs:   map[string]string{"null\x00null\x00": "fizzbuzz"},
+			},
+		}},
+		err: ErrHeader,
+	}, {
+		entries: []*entry{{
+			header: &Header{
+				Name:     "null\x00.txt",
+				Typeflag: '0',
+			},
+		}},
+		err: ErrHeader,
+	}, {
+		file: "testdata/gnu-utf8.tar",
+		entries: []*entry{{
+			header: &Header{
+				Name: "☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹☺☻☹",
+				Mode: 0644,
+				Uid:  1000, Gid: 1000,
+				ModTime:  time.Unix(0, 0),
+				Typeflag: '0',
+				Uname:    "☺",
+				Gname:    "⚹",
+				Devminor: -1, // Force use of GNU format
+			},
+		}},
+	}, {
+		file: "testdata/gnu-not-utf8.tar",
+		entries: []*entry{{
+			header: &Header{
+				Name:     "hi\x80\x81\x82\x83bye",
+				Mode:     0644,
+				Uid:      1000,
+				Gid:      1000,
+				ModTime:  time.Unix(0, 0),
+				Typeflag: '0',
+				Uname:    "rawr",
+				Gname:    "dsnet",
+				Devminor: -1, // Force use of GNU format
+			},
+		}},
+	}}
 
-		actual := buf.Bytes()
-		if !bytes.Equal(expected, actual) {
-			t.Errorf("test %d: Incorrect result: (-=expected, +=actual)\n%v",
-				i, bytediff(expected, actual))
-		}
-		if testing.Short() { // The second test is expensive.
-			break
-		}
+	for _, v := range vectors {
+		t.Run(path.Base(v.file), func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			tw := NewWriter(iotest.TruncateWriter(buf, 4<<10)) // only catch the first 4 KB
+			canFail := false
+			for i, entry := range v.entries {
+				canFail = canFail || entry.header.Size > 1<<10 || v.err != nil
+
+				err := tw.WriteHeader(entry.header)
+				if err != v.err {
+					t.Fatalf("entry %d: WriteHeader() = %v, want %v", i, err, v.err)
+				}
+				if _, err := io.WriteString(tw, entry.contents); err != nil {
+					t.Fatalf("entry %d: WriteString() = %v, want nil", i, err)
+				}
+			}
+			// Only interested in Close failures for the small tests.
+			if err := tw.Close(); err != nil && !canFail {
+				t.Fatalf("Close() = %v, want nil", err)
+			}
+
+			if v.file != "" {
+				want, err := ioutil.ReadFile(v.file)
+				if err != nil {
+					t.Fatalf("ReadFile() = %v, want nil", err)
+				}
+				got := buf.Bytes()
+				if !bytes.Equal(want, got) {
+					t.Fatalf("incorrect result: (-got +want)\n%v", bytediff(got, want))
+				}
+			}
+		})
 	}
 }
 
@@ -558,27 +576,110 @@ func TestValidTypeflagWithPAXHeader(t *testing.T) {
 	}
 }
 
-func TestWriteAfterClose(t *testing.T) {
-	var buffer bytes.Buffer
-	tw := NewWriter(&buffer)
+// failOnceWriter fails exactly once and then always reports success.
+type failOnceWriter bool
 
-	hdr := &Header{
-		Name: "small.txt",
-		Size: 5,
+func (w *failOnceWriter) Write(b []byte) (int, error) {
+	if !*w {
+		return 0, io.ErrShortWrite
 	}
-	if err := tw.WriteHeader(hdr); err != nil {
-		t.Fatalf("Failed to write header: %s", err)
-	}
-	tw.Close()
-	if _, err := tw.Write([]byte("Kilts")); err != ErrWriteAfterClose {
-		t.Fatalf("Write: got %v; want ErrWriteAfterClose", err)
-	}
+	*w = true
+	return len(b), nil
+}
+
+func TestWriterErrors(t *testing.T) {
+	t.Run("HeaderOnly", func(t *testing.T) {
+		tw := NewWriter(new(bytes.Buffer))
+		hdr := &Header{Name: "dir/", Typeflag: TypeDir}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("WriteHeader() = %v, want nil", err)
+		}
+		if _, err := tw.Write([]byte{0x00}); err != ErrWriteTooLong {
+			t.Fatalf("Write() = %v, want %v", err, ErrWriteTooLong)
+		}
+	})
+
+	t.Run("NegativeSize", func(t *testing.T) {
+		tw := NewWriter(new(bytes.Buffer))
+		hdr := &Header{Name: "small.txt", Size: -1}
+		if err := tw.WriteHeader(hdr); err != ErrHeader {
+			t.Fatalf("WriteHeader() = nil, want %v", ErrHeader)
+		}
+	})
+
+	t.Run("BeforeHeader", func(t *testing.T) {
+		tw := NewWriter(new(bytes.Buffer))
+		if _, err := tw.Write([]byte("Kilts")); err != ErrWriteTooLong {
+			t.Fatalf("Write() = %v, want %v", err, ErrWriteTooLong)
+		}
+	})
+
+	t.Run("AfterClose", func(t *testing.T) {
+		tw := NewWriter(new(bytes.Buffer))
+		hdr := &Header{Name: "small.txt"}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("WriteHeader() = %v, want nil", err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatalf("Close() = %v, want nil", err)
+		}
+		if _, err := tw.Write([]byte("Kilts")); err != ErrWriteAfterClose {
+			t.Fatalf("Write() = %v, want %v", err, ErrWriteAfterClose)
+		}
+		if err := tw.Flush(); err != ErrWriteAfterClose {
+			t.Fatalf("Flush() = %v, want %v", err, ErrWriteAfterClose)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatalf("Close() = %v, want nil", err)
+		}
+	})
+
+	t.Run("PrematureFlush", func(t *testing.T) {
+		tw := NewWriter(new(bytes.Buffer))
+		hdr := &Header{Name: "small.txt", Size: 5}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("WriteHeader() = %v, want nil", err)
+		}
+		if err := tw.Flush(); err == nil {
+			t.Fatalf("Flush() = %v, want non-nil error", err)
+		}
+	})
+
+	t.Run("PrematureClose", func(t *testing.T) {
+		tw := NewWriter(new(bytes.Buffer))
+		hdr := &Header{Name: "small.txt", Size: 5}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("WriteHeader() = %v, want nil", err)
+		}
+		if err := tw.Close(); err == nil {
+			t.Fatalf("Close() = %v, want non-nil error", err)
+		}
+	})
+
+	t.Run("Persistence", func(t *testing.T) {
+		tw := NewWriter(new(failOnceWriter))
+		if err := tw.WriteHeader(&Header{}); err != io.ErrShortWrite {
+			t.Fatalf("WriteHeader() = %v, want %v", err, io.ErrShortWrite)
+		}
+		if err := tw.WriteHeader(&Header{Name: "small.txt"}); err == nil {
+			t.Errorf("WriteHeader() = got %v, want non-nil error", err)
+		}
+		if _, err := tw.Write(nil); err == nil {
+			t.Errorf("Write() = %v, want non-nil error", err)
+		}
+		if err := tw.Flush(); err == nil {
+			t.Errorf("Flush() = %v, want non-nil error", err)
+		}
+		if err := tw.Close(); err == nil {
+			t.Errorf("Close() = %v, want non-nil error", err)
+		}
+	})
 }
 
 func TestSplitUSTARPath(t *testing.T) {
-	var sr = strings.Repeat
+	sr := strings.Repeat
 
-	var vectors = []struct {
+	vectors := []struct {
 		input  string // Input path
 		prefix string // Expected output prefix
 		suffix string // Expected output suffix
@@ -587,17 +688,17 @@ func TestSplitUSTARPath(t *testing.T) {
 		{"", "", "", false},
 		{"abc", "", "", false},
 		{"用戶名", "", "", false},
-		{sr("a", fileNameSize), "", "", false},
-		{sr("a", fileNameSize) + "/", "", "", false},
-		{sr("a", fileNameSize) + "/a", sr("a", fileNameSize), "a", true},
-		{sr("a", fileNamePrefixSize) + "/", "", "", false},
-		{sr("a", fileNamePrefixSize) + "/a", sr("a", fileNamePrefixSize), "a", true},
-		{sr("a", fileNameSize+1), "", "", false},
-		{sr("/", fileNameSize+1), sr("/", fileNameSize-1), "/", true},
-		{sr("a", fileNamePrefixSize) + "/" + sr("b", fileNameSize),
-			sr("a", fileNamePrefixSize), sr("b", fileNameSize), true},
-		{sr("a", fileNamePrefixSize) + "//" + sr("b", fileNameSize), "", "", false},
-		{sr("a/", fileNameSize), sr("a/", 77) + "a", sr("a/", 22), true},
+		{sr("a", nameSize), "", "", false},
+		{sr("a", nameSize) + "/", "", "", false},
+		{sr("a", nameSize) + "/a", sr("a", nameSize), "a", true},
+		{sr("a", prefixSize) + "/", "", "", false},
+		{sr("a", prefixSize) + "/a", sr("a", prefixSize), "a", true},
+		{sr("a", nameSize+1), "", "", false},
+		{sr("/", nameSize+1), sr("/", nameSize-1), "/", true},
+		{sr("a", prefixSize) + "/" + sr("b", nameSize),
+			sr("a", prefixSize), sr("b", nameSize), true},
+		{sr("a", prefixSize) + "//" + sr("b", nameSize), "", "", false},
+		{sr("a/", nameSize), sr("a/", 77) + "a", sr("a/", 22), true},
 	}
 
 	for _, v := range vectors {
@@ -609,114 +710,51 @@ func TestSplitUSTARPath(t *testing.T) {
 	}
 }
 
-func TestFormatPAXRecord(t *testing.T) {
-	var medName = strings.Repeat("CD", 50)
-	var longName = strings.Repeat("AB", 100)
-
-	var vectors = []struct {
-		inputKey string
-		inputVal string
-		output   string
-	}{
-		{"k", "v", "6 k=v\n"},
-		{"path", "/etc/hosts", "19 path=/etc/hosts\n"},
-		{"path", longName, "210 path=" + longName + "\n"},
-		{"path", medName, "110 path=" + medName + "\n"},
-		{"foo", "ba", "9 foo=ba\n"},
-		{"foo", "bar", "11 foo=bar\n"},
-		{"foo", "b=\nar=\n==\x00", "18 foo=b=\nar=\n==\x00\n"},
-		{"foo", "hello9 foo=ba\nworld", "27 foo=hello9 foo=ba\nworld\n"},
-		{"☺☻☹", "日a本b語ç", "27 ☺☻☹=日a本b語ç\n"},
-		{"\x00hello", "\x00world", "17 \x00hello=\x00world\n"},
+// TestIssue12594 tests that the Writer does not attempt to populate the prefix
+// field when encoding a header in the GNU format. The prefix field is valid
+// in USTAR and PAX, but not GNU.
+func TestIssue12594(t *testing.T) {
+	names := []string{
+		"0/1/2/3/4/5/6/7/8/9/10/11/12/13/14/15/16/17/18/19/20/21/22/23/24/25/26/27/28/29/30/file.txt",
+		"0/1/2/3/4/5/6/7/8/9/10/11/12/13/14/15/16/17/18/19/20/21/22/23/24/25/26/27/28/29/30/31/32/33/file.txt",
+		"0/1/2/3/4/5/6/7/8/9/10/11/12/13/14/15/16/17/18/19/20/21/22/23/24/25/26/27/28/29/30/31/32/333/file.txt",
+		"0/1/2/3/4/5/6/7/8/9/10/11/12/13/14/15/16/17/18/19/20/21/22/23/24/25/26/27/28/29/30/31/32/33/34/35/36/37/38/39/40/file.txt",
+		"0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000/file.txt",
+		"/home/support/.openoffice.org/3/user/uno_packages/cache/registry/com.sun.star.comp.deployment.executable.PackageRegistryBackend",
 	}
 
-	for _, v := range vectors {
-		output := formatPAXRecord(v.inputKey, v.inputVal)
-		if output != v.output {
-			t.Errorf("formatPAXRecord(%q, %q): got %q, want %q",
-				v.inputKey, v.inputVal, output, v.output)
+	for i, name := range names {
+		var b bytes.Buffer
+
+		tw := NewWriter(&b)
+		if err := tw.WriteHeader(&Header{
+			Name: name,
+			Uid:  1 << 25, // Prevent USTAR format
+		}); err != nil {
+			t.Errorf("test %d, unexpected WriteHeader error: %v", i, err)
 		}
-	}
-}
-
-func TestFitsInBase256(t *testing.T) {
-	var vectors = []struct {
-		input int64
-		width int
-		ok    bool
-	}{
-		{+1, 8, true},
-		{0, 8, true},
-		{-1, 8, true},
-		{1 << 56, 8, false},
-		{(1 << 56) - 1, 8, true},
-		{-1 << 56, 8, true},
-		{(-1 << 56) - 1, 8, false},
-		{121654, 8, true},
-		{-9849849, 8, true},
-		{math.MaxInt64, 9, true},
-		{0, 9, true},
-		{math.MinInt64, 9, true},
-		{math.MaxInt64, 12, true},
-		{0, 12, true},
-		{math.MinInt64, 12, true},
-	}
-
-	for _, v := range vectors {
-		ok := fitsInBase256(v.width, v.input)
-		if ok != v.ok {
-			t.Errorf("checkNumeric(%d, %d): got %v, want %v", v.input, v.width, ok, v.ok)
+		if err := tw.Close(); err != nil {
+			t.Errorf("test %d, unexpected Close error: %v", i, err)
 		}
-	}
-}
 
-func TestFormatNumeric(t *testing.T) {
-	var vectors = []struct {
-		input  int64
-		output string
-		ok     bool
-	}{
-		// Test base-256 (binary) encoded values.
-		{-1, "\xff", true},
-		{-1, "\xff\xff", true},
-		{-1, "\xff\xff\xff", true},
-		{(1 << 0), "0", false},
-		{(1 << 8) - 1, "\x80\xff", true},
-		{(1 << 8), "0\x00", false},
-		{(1 << 16) - 1, "\x80\xff\xff", true},
-		{(1 << 16), "00\x00", false},
-		{-1 * (1 << 0), "\xff", true},
-		{-1*(1<<0) - 1, "0", false},
-		{-1 * (1 << 8), "\xff\x00", true},
-		{-1*(1<<8) - 1, "0\x00", false},
-		{-1 * (1 << 16), "\xff\x00\x00", true},
-		{-1*(1<<16) - 1, "00\x00", false},
-		{537795476381659745, "0000000\x00", false},
-		{537795476381659745, "\x80\x00\x00\x00\x07\x76\xa2\x22\xeb\x8a\x72\x61", true},
-		{-615126028225187231, "0000000\x00", false},
-		{-615126028225187231, "\xff\xff\xff\xff\xf7\x76\xa2\x22\xeb\x8a\x72\x61", true},
-		{math.MaxInt64, "0000000\x00", false},
-		{math.MaxInt64, "\x80\x00\x00\x00\x7f\xff\xff\xff\xff\xff\xff\xff", true},
-		{math.MinInt64, "0000000\x00", false},
-		{math.MinInt64, "\xff\xff\xff\xff\x80\x00\x00\x00\x00\x00\x00\x00", true},
-		{math.MaxInt64, "\x80\x7f\xff\xff\xff\xff\xff\xff\xff", true},
-		{math.MinInt64, "\xff\x80\x00\x00\x00\x00\x00\x00\x00", true},
-	}
-
-	for _, v := range vectors {
-		var f formatter
-		output := make([]byte, len(v.output))
-		f.formatNumeric(output, v.input)
-		ok := (f.err == nil)
-		if ok != v.ok {
-			if v.ok {
-				t.Errorf("formatNumeric(%d): got formatting failure, want success", v.input)
-			} else {
-				t.Errorf("formatNumeric(%d): got formatting success, want failure", v.input)
-			}
+		// The prefix field should never appear in the GNU format.
+		var blk block
+		copy(blk[:], b.Bytes())
+		prefix := string(blk.USTAR().Prefix())
+		if i := strings.IndexByte(prefix, 0); i >= 0 {
+			prefix = prefix[:i] // Truncate at the NUL terminator
 		}
-		if string(output) != v.output {
-			t.Errorf("formatNumeric(%d): got %q, want %q", v.input, output, v.output)
+		if blk.GetFormat() == formatGNU && len(prefix) > 0 && strings.HasPrefix(name, prefix) {
+			t.Errorf("test %d, found prefix in GNU format: %s", i, prefix)
+		}
+
+		tr := NewReader(&b)
+		hdr, err := tr.Next()
+		if err != nil {
+			t.Errorf("test %d, unexpected Next error: %v", i, err)
+		}
+		if hdr.Name != name {
+			t.Errorf("test %d, hdr.Name = %s, want %s", i, hdr.Name, name)
 		}
 	}
 }

@@ -1,6 +1,6 @@
 // errorcheck
 
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -20,3 +20,5 @@ var x4 = x1 && b2   // ERROR "mismatched types B and B2"
 var x5 = x2 && b2   // ERROR "mismatched types B and B2"
 var x6 = b2 && x1   // ERROR "mismatched types B2 and B"
 var x7 = b2 && x2   // ERROR "mismatched types B2 and B"
+
+var x8 = b && !B2(true) // ERROR "mismatched types B and B2"

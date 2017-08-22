@@ -1,4 +1,4 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -23,7 +23,7 @@ func registerInit(name string, f func()) {
 
 func main() {
 	if len(os.Args) < 2 {
-		println("usage: "+os.Args[0]+" name-of-test")
+		println("usage: " + os.Args[0] + " name-of-test")
 		return
 	}
 	f := cmds[os.Args[1]]

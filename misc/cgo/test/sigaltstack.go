@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build !windows
+// +build !windows,!android
 
 // Test that the Go runtime still works if C code changes the signal stack.
 
@@ -17,7 +17,7 @@ package cgotest
 static stack_t oss;
 static char signalStack[SIGSTKSZ];
 
-static void changeSignalStack() {
+static void changeSignalStack(void) {
 	stack_t ss;
 	memset(&ss, 0, sizeof ss);
 	ss.ss_sp = signalStack;
@@ -29,8 +29,8 @@ static void changeSignalStack() {
 	}
 }
 
-static void restoreSignalStack() {
-#if defined(__x86_64__) && defined(__APPLE__)
+static void restoreSignalStack(void) {
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__APPLE__)
 	// The Darwin C library enforces a minimum that the kernel does not.
 	// This is OK since we allocated this much space in mpreinit,
 	// it was just removed from the buffer by stackalloc.
@@ -42,7 +42,7 @@ static void restoreSignalStack() {
 	}
 }
 
-static int zero() {
+static int zero(void) {
 	return 0;
 }
 */
@@ -57,6 +57,8 @@ func testSigaltstack(t *testing.T) {
 	switch {
 	case runtime.GOOS == "solaris", runtime.GOOS == "darwin" && (runtime.GOARCH == "arm" || runtime.GOARCH == "arm64"):
 		t.Skipf("switching signal stack not implemented on %s/%s", runtime.GOOS, runtime.GOARCH)
+	case runtime.GOOS == "darwin" && runtime.GOARCH == "386":
+		t.Skipf("sigaltstack fails on darwin/386")
 	}
 
 	C.changeSignalStack()

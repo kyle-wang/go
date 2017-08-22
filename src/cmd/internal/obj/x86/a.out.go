@@ -1,5 +1,5 @@
 // Inferno utils/6c/6.out.h
-// http://code.google.com/p/inferno-os/source/browse/utils/6c/6.out.h
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6c/6.out.h
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -33,6 +33,12 @@ package x86
 import "cmd/internal/obj"
 
 //go:generate go run ../stringer.go -i $GOFILE -o anames.go -p x86
+
+const (
+	/* mark flags */
+	DONE          = 1 << iota
+	PRESERVEFLAGS // not allowed to clobber flags
+)
 
 /*
  *	amd64
@@ -89,7 +95,11 @@ const (
 	ADIVL
 	ADIVW
 	AENTER
+	AHADDPD
+	AHADDPS
 	AHLT
+	AHSUBPD
+	AHSUBPS
 	AIDIVB
 	AIDIVL
 	AIDIVW
@@ -110,23 +120,23 @@ const (
 	AINTO
 	AIRETL
 	AIRETW
-	AJCC
-	AJCS
+	AJCC // >= unsigned
+	AJCS // < unsigned
 	AJCXZL
-	AJEQ
-	AJGE
-	AJGT
-	AJHI
-	AJLE
-	AJLS
-	AJLT
-	AJMI
-	AJNE
-	AJOC
-	AJOS
-	AJPC
-	AJPL
-	AJPS
+	AJEQ // == (zero)
+	AJGE // >= signed
+	AJGT // > signed
+	AJHI // > unsigned
+	AJLE // <= signed
+	AJLS // <= unsigned
+	AJLT // < signed
+	AJMI // sign bit set (negative)
+	AJNE // != (nonzero)
+	AJOC // overflow clear
+	AJOS // overflow set
+	AJPC // parity clear
+	AJPL // sign bit clear (positive)
+	AJPS // parity set
 	ALAHF
 	ALARL
 	ALARW
@@ -181,6 +191,9 @@ const (
 	APAUSE
 	APOPAL
 	APOPAW
+	APOPCNTW
+	APOPCNTL
+	APOPCNTQ
 	APOPFL
 	APOPFW
 	APOPL
@@ -282,8 +295,6 @@ const (
 	AFMOVX
 	AFMOVXP
 
-	AFCOMB
-	AFCOMBP
 	AFCOMD
 	AFCOMDP
 	AFCOMDPP
@@ -500,16 +511,29 @@ const (
 	AXADDQ
 	AXCHGQ
 	AXORQ
+	AXGETBV
 
 	// media
 	AADDPD
 	AADDPS
 	AADDSD
 	AADDSS
+	AANDNL
+	AANDNQ
 	AANDNPD
 	AANDNPS
 	AANDPD
 	AANDPS
+	ABEXTRL
+	ABEXTRQ
+	ABLSIL
+	ABLSIQ
+	ABLSMSKL
+	ABLSMSKQ
+	ABLSRL
+	ABLSRQ
+	ABZHIL
+	ABZHIQ
 	ACMPPD
 	ACMPPS
 	ACMPSD
@@ -547,6 +571,7 @@ const (
 	AFXRSTOR64
 	AFXSAVE
 	AFXSAVE64
+	ALDDQU
 	ALDMXCSR
 	AMASKMOVOU
 	AMASKMOVQ
@@ -583,6 +608,8 @@ const (
 	AMULPS
 	AMULSD
 	AMULSS
+	AMULXL
+	AMULXQ
 	AORPD
 	AORPS
 	APACKSSLW
@@ -596,13 +623,6 @@ const (
 	APADDUSB
 	APADDUSW
 	APADDW
-	APANDB
-	APANDL
-	APANDSB
-	APANDSW
-	APANDUSB
-	APANDUSW
-	APANDW
 	APAND
 	APANDN
 	APAVGB
@@ -613,53 +633,64 @@ const (
 	APCMPGTB
 	APCMPGTL
 	APCMPGTW
+	APDEPL
+	APDEPQ
+	APEXTL
+	APEXTQ
+	APEXTRB
+	APEXTRD
+	APEXTRQ
 	APEXTRW
-	APFACC
-	APFADD
-	APFCMPEQ
-	APFCMPGE
-	APFCMPGT
-	APFMAX
-	APFMIN
-	APFMUL
-	APFNACC
-	APFPNACC
-	APFRCP
-	APFRCPIT1
-	APFRCPI2T
-	APFRSQIT1
-	APFRSQRT
-	APFSUB
-	APFSUBR
-	APINSRW
+	APHADDD
+	APHADDSW
+	APHADDW
+	APHMINPOSUW
+	APHSUBD
+	APHSUBSW
+	APHSUBW
+	APINSRB
 	APINSRD
 	APINSRQ
+	APINSRW
 	APMADDWL
 	APMAXSW
 	APMAXUB
 	APMINSW
 	APMINUB
 	APMOVMSKB
-	APMULHRW
+	APMOVSXBD
+	APMOVSXBQ
+	APMOVSXBW
+	APMOVSXDQ
+	APMOVSXWD
+	APMOVSXWQ
+	APMOVZXBD
+	APMOVZXBQ
+	APMOVZXBW
+	APMOVZXDQ
+	APMOVZXWD
+	APMOVZXWQ
+	APMULDQ
 	APMULHUW
 	APMULHW
+	APMULLD
 	APMULLW
 	APMULULQ
 	APOR
 	APSADBW
+	APSHUFB
 	APSHUFHW
 	APSHUFL
 	APSHUFLW
 	APSHUFW
-	APSHUFB
-	APSLLO
 	APSLLL
+	APSLLO
 	APSLLQ
 	APSLLW
 	APSRAL
 	APSRAW
-	APSRLO
 	APSRLL
+	APSRLO
 	APSRLQ
 	APSRLW
 	APSUBB
@@ -670,7 +701,6 @@ const (
 	APSUBUSB
 	APSUBUSW
 	APSUBW
-	APSWAPL
 	APUNPCKHBW
 	APUNPCKHLQ
 	APUNPCKHQDQ
@@ -684,6 +714,12 @@ const (
 	ARCPSS
 	ARSQRTPS
 	ARSQRTSS
+	ASARXL
+	ASARXQ
+	ASHLXL
+	ASHLXQ
+	ASHRXL
+	ASHRXQ
 	ASHUFPD
 	ASHUFPS
 	ASQRTPD
@@ -703,17 +739,13 @@ const (
 	AUNPCKLPS
 	AXORPD
 	AXORPS
+	APCMPESTRI
 
-	APF2IW
-	APF2IL
-	API2FW
-	API2FL
 	ARETFW
 	ARETFL
 	ARETFQ
 	ASWAPGS
 
-	AMODE
 	ACRC32B
 	ACRC32Q
 	AIMUL3Q
@@ -738,20 +770,46 @@ const (
 	AROUNDSS
 	AROUNDPD
 	AROUNDSD
+	AMOVDDUP
+	AMOVSHDUP
+	AMOVSLDUP
 
 	APSHUFD
 	APCLMULQDQ
 
 	AVZEROUPPER
-	AMOVHDU
-	AMOVNTHD
-	AMOVHDA
+	AVMOVDQU
+	AVMOVNTDQ
+	AVMOVDQA
 	AVPCMPEQB
 	AVPXOR
 	AVPMOVMSKB
 	AVPAND
 	AVPTEST
 	AVPBROADCASTB
+	AVPSHUFB
+	AVPSHUFD
+	AVPERM2F128
+	AVPALIGNR
+	AVPADDQ
+	AVPADDD
+	AVPSRLDQ
+	AVPSLLDQ
+	AVPSRLQ
+	AVPSLLQ
+	AVPSRLD
+	AVPSLLD
+	AVPOR
+	AVPBLENDD
+	AVINSERTI128
+	AVPERM2I128
+	ARORXL
+	ARORXQ
+	AVBROADCASTSS
+	AVBROADCASTSD
+	AVMOVDDUP
+	AVMOVSHDUP
+	AVMOVSLDUP
 
 	// from 386
 	AJCXZW
@@ -858,6 +916,23 @@ const (
 	REG_X14
 	REG_X15
 
+	REG_Y0
+	REG_Y1
+	REG_Y2
+	REG_Y3
+	REG_Y4
+	REG_Y5
+	REG_Y6
+	REG_Y7
+	REG_Y8
+	REG_Y9
+	REG_Y10
+	REG_Y11
+	REG_Y12
+	REG_Y13
+	REG_Y14
+	REG_Y15
+
 	REG_CS
 	REG_SS
 	REG_DS
@@ -931,3 +1006,120 @@ const (
 	T_64     = 1 << 6
 	T_GOTYPE = 1 << 7
 )
+
+// https://www.uclibc.org/docs/psABI-x86_64.pdf, figure 3.36
+var AMD64DWARFRegisters = map[int16]int16{
+	REG_AX:  0,
+	REG_DX:  1,
+	REG_CX:  2,
+	REG_BX:  3,
+	REG_SI:  4,
+	REG_DI:  5,
+	REG_BP:  6,
+	REG_SP:  7,
+	REG_R8:  8,
+	REG_R9:  9,
+	REG_R10: 10,
+	REG_R11: 11,
+	REG_R12: 12,
+	REG_R13: 13,
+	REG_R14: 14,
+	REG_R15: 15,
+	// 16 is "Return Address RA", whatever that is.
+	// XMM registers. %xmmN => XN.
+	REG_X0:  17,
+	REG_X1:  18,
+	REG_X2:  19,
+	REG_X3:  20,
+	REG_X4:  21,
+	REG_X5:  22,
+	REG_X6:  23,
+	REG_X7:  24,
+	REG_X8:  25,
+	REG_X9:  26,
+	REG_X10: 27,
+	REG_X11: 28,
+	REG_X12: 29,
+	REG_X13: 30,
+	REG_X14: 31,
+	REG_X15: 32,
+	// ST registers. %stN => FN.
+	REG_F0: 33,
+	REG_F1: 34,
+	REG_F2: 35,
+	REG_F3: 36,
+	REG_F4: 37,
+	REG_F5: 38,
+	REG_F6: 39,
+	REG_F7: 40,
+	// MMX registers. %mmN => MN.
+	REG_M0: 41,
+	REG_M1: 42,
+	REG_M2: 43,
+	REG_M3: 44,
+	REG_M4: 45,
+	REG_M5: 46,
+	REG_M6: 47,
+	REG_M7: 48,
+	// 48 is flags, which doesn't have a name.
+	REG_ES: 50,
+	REG_CS: 51,
+	REG_SS: 52,
+	REG_DS: 53,
+	REG_FS: 54,
+	REG_GS: 55,
+	// 58 and 59 are {fs,gs}base, which don't have names.
+	REG_TR:   62,
+	REG_LDTR: 63,
+	// 64-66 are mxcsr, fcw, fsw, which don't have names.
+}
+
+// https://www.uclibc.org/docs/psABI-i386.pdf, table 2.14
+var X86DWARFRegisters = map[int16]int16{
+	REG_AX: 0,
+	REG_CX: 1,
+	REG_DX: 2,
+	REG_BX: 3,
+	REG_SP: 4,
+	REG_BP: 5,
+	REG_SI: 6,
+	REG_DI: 7,
+	// 8 is "Return Address RA", whatever that is.
+	// 9 is flags, which doesn't have a name.
+	// ST registers. %stN => FN.
+	REG_F0: 11,
+	REG_F1: 12,
+	REG_F2: 13,
+	REG_F3: 14,
+	REG_F4: 15,
+	REG_F5: 16,
+	REG_F6: 17,
+	REG_F7: 18,
+	// XMM registers. %xmmN => XN.
+	REG_X0: 21,
+	REG_X1: 22,
+	REG_X2: 23,
+	REG_X3: 24,
+	REG_X4: 25,
+	REG_X5: 26,
+	REG_X6: 27,
+	REG_X7: 28,
+	// MMX registers. %mmN => MN.
+	REG_M0: 29,
+	REG_M1: 30,
+	REG_M2: 31,
+	REG_M3: 32,
+	REG_M4: 33,
+	REG_M5: 34,
+	REG_M6: 35,
+	REG_M7: 36,
+	// 39 is mxcsr, which doesn't have a name.
+	REG_ES:   40,
+	REG_CS:   41,
+	REG_SS:   42,
+	REG_DS:   43,
+	REG_FS:   44,
+	REG_GS:   45,
+	REG_TR:   48,
+	REG_LDTR: 49,
+}
